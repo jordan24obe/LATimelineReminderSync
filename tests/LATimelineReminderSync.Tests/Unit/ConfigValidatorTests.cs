@@ -10,7 +10,7 @@ public class ConfigValidatorTests
     private static SyncServiceConfig MakeValidConfig() => new()
     {
         SourceUrl = "https://raw.githubusercontent.com/org/repo/main/reminders.txt",
-        AddonDataFolder = @"C:\WoW\WTF\Account\Test\SavedVariables",
+        WoWInstallDir = @"C:\Program Files (x86)\World of Warcraft",
         PollIntervalSeconds = 300,
     };
 
@@ -65,20 +65,20 @@ public class ConfigValidatorTests
     }
 
     [Fact]
-    public void EmptyAddonDataFolder_IsRejected()
+    public void EmptyWoWInstallDir_IsRejected()
     {
         var config = MakeValidConfig();
-        config.AddonDataFolder = "";
+        config.WoWInstallDir = "";
         var (isValid, errors) = _validator.Validate(config);
         Assert.False(isValid);
-        Assert.Contains(errors, e => e.Contains("AddonDataFolder"));
+        Assert.Contains(errors, e => e.Contains("WoWInstallDir"));
     }
 
     [Fact]
     public void PathTraversal_IsRejected()
     {
         var config = MakeValidConfig();
-        config.AddonDataFolder = @"C:\WoW\..\secret";
+        config.WoWInstallDir = @"C:\WoW\..\secret";
         var (isValid, errors) = _validator.Validate(config);
         Assert.False(isValid);
         Assert.Contains(errors, e => e.Contains("path traversal"));
@@ -103,7 +103,7 @@ public class ConfigValidatorTests
         var config = new SyncServiceConfig
         {
             SourceUrl = "",
-            AddonDataFolder = "",
+            WoWInstallDir = "",
             PollIntervalSeconds = 0,
         };
         var (isValid, errors) = _validator.Validate(config);

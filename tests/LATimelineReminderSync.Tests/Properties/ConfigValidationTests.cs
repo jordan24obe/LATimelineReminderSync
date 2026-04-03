@@ -16,7 +16,7 @@ public class ConfigValidationTests
     private static SyncServiceConfig MakeValidConfig() => new()
     {
         SourceUrl = "https://raw.githubusercontent.com/org/repo/main/reminders.txt",
-        AddonDataFolder = @"C:\WoW\WTF\Account\Test\SavedVariables",
+        WoWInstallDir = @"C:\Program Files (x86)\World of Warcraft",
         PollIntervalSeconds = 300,
     };
 
@@ -51,17 +51,17 @@ public class ConfigValidationTests
     }
 
     [Property(MaxTest = 100)]
-    public Property MissingAddonDataFolder_IsRejected()
+    public Property MissingWoWInstallDir_IsRejected()
     {
         var gen = Gen.Elements("", " ", "\t");
 
         return Prop.ForAll(gen.ToArbitrary(), value =>
         {
             var config = MakeValidConfig();
-            config.AddonDataFolder = value;
+            config.WoWInstallDir = value;
             var (isValid, errors) = _validator.Validate(config);
-            return (!isValid && errors.Any(e => e.Contains("AddonDataFolder")))
-                .Label("Missing AddonDataFolder should be rejected");
+            return (!isValid && errors.Any(e => e.Contains("WoWInstallDir")))
+                .Label("Missing WoWInstallDir should be rejected");
         });
     }
 
@@ -73,7 +73,7 @@ public class ConfigValidationTests
         return Prop.ForAll(gen.ToArbitrary(), value =>
         {
             var config = MakeValidConfig();
-            config.AddonDataFolder = value;
+            config.WoWInstallDir = value;
             var (isValid, errors) = _validator.Validate(config);
             return (!isValid && errors.Any(e => e.Contains("path traversal")))
                 .Label("Path traversal should be rejected");
@@ -99,12 +99,12 @@ public class ConfigValidationTests
     public Property ValidConfig_IsAccepted()
     {
         var gen = from urlSuffix in Gen.Elements("reminders.txt", "data.lua", "export.txt")
-                  from folderSuffix in Gen.Elements("Account1", "Account2", "TestAcct")
+                  from installDir in Gen.Elements(@"C:\WoW", @"D:\Games\World of Warcraft", @"C:\Program Files\WoW")
                   from poll in Gen.Choose(1, 3600)
                   select new SyncServiceConfig
                   {
                       SourceUrl = $"https://example.com/{urlSuffix}",
-                      AddonDataFolder = $@"C:\WoW\WTF\{folderSuffix}\SavedVariables",
+                      WoWInstallDir = installDir,
                       PollIntervalSeconds = poll,
                   };
 

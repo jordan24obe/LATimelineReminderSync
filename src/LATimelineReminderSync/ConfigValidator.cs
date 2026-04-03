@@ -14,10 +14,10 @@ public class ConfigValidator
                  || (uri.Scheme != "https" && uri.Scheme != "http"))
             errors.Add("SourceUrl must be a valid HTTP/HTTPS URL.");
 
-        if (string.IsNullOrWhiteSpace(config.AddonDataFolder))
-            errors.Add("AddonDataFolder is required.");
-        else if (config.AddonDataFolder.Contains(".."))
-            errors.Add("AddonDataFolder cannot contain path traversal sequences.");
+        if (string.IsNullOrWhiteSpace(config.WoWInstallDir))
+            errors.Add("WoWInstallDir is required.");
+        else if (config.WoWInstallDir.Contains(".."))
+            errors.Add("WoWInstallDir cannot contain path traversal sequences.");
 
         if (config.PollIntervalSeconds <= 0)
             errors.Add("PollIntervalSeconds must be greater than 0.");

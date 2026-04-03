@@ -72,6 +72,19 @@ if (!isValid)
     Environment.Exit(1);
 }
 
+// Resolve WoW account SavedVariables path
+var resolveLogger = LoggerFactory.Create(logging => logging.AddConsole())
+    .CreateLogger("LATimelineReminderSync.AccountResolver");
+
+var savedVariablesPath = AccountResolver.Resolve(
+    syncConfig.WoWInstallDir, syncConfig.AccountName, resolveLogger);
+
+if (savedVariablesPath is null)
+{
+    resolveLogger.LogError("Failed to resolve WoW SavedVariables path. Exiting.");
+    Environment.Exit(1);
+}
+
 // Configure Serilog
 var logLevel = ParseLogLevel(syncConfig.LogLevel);
 var logPath = Path.Combine(AppContext.BaseDirectory, "Logs", "trsync-.log");
@@ -103,7 +116,7 @@ builder.Services.AddSingleton<IContentValidator, ContentValidator>();
 builder.Services.AddSingleton<IContentHashStore, ContentHashStore>();
 builder.Services.AddSingleton<ISavedVariablesWriter>(sp =>
     new SavedVariablesWriter(
-        syncConfig.AddonDataFolder,
+        savedVariablesPath,
         syncConfig.ProfileName,
         sp.GetRequiredService<ILogger<SavedVariablesWriter>>()));
 
