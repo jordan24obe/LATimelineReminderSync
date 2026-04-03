@@ -11,15 +11,17 @@ public class SavedVariablesWriter : ISavedVariablesWriter
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(2);
 
     private readonly string _addonDataFolder;
+    private readonly string _profileName;
     private readonly ILogger _logger;
 
-    public SavedVariablesWriter(string addonDataFolder, ILogger<SavedVariablesWriter> logger)
+    public SavedVariablesWriter(string addonDataFolder, string profileName, ILogger<SavedVariablesWriter> logger)
     {
         _addonDataFolder = addonDataFolder;
+        _profileName = profileName;
         _logger = logger;
     }
 
-    public async Task<WriteResult> WriteAsync(string content, CancellationToken ct)
+    public async Task<WriteResult> WriteAsync(Dictionary<EncounterEntry, string> encounterProfiles, CancellationToken ct)
     {
         if (!Directory.Exists(_addonDataFolder))
         {
@@ -31,8 +33,16 @@ public class SavedVariablesWriter : ISavedVariablesWriter
         var luaFilePath = Path.Combine(_addonDataFolder, Constants.LuaFileName);
         var tmpFilePath = luaFilePath + ".tmp";
 
-        // Build the new file content by merging with existing file
-        var newFileContent = await BuildMergedContentAsync(luaFilePath, content);
+        // Read existing file content
+        var fileContent = File.Exists(luaFilePath)
+            ? await File.ReadAllTextAsync(luaFilePath, ct)
+            : "";
+
+        // Apply each encounter profile merge
+        foreach (var (entry, profileContent) in encounterProfiles)
+        {
+            fileContent = MergeEncounterProfile(fileContent, entry, profileContent);
+        }
 
         // Create backup of existing file before writing
         if (File.Exists(luaFilePath))
@@ -47,10 +57,11 @@ public class SavedVariablesWriter : ISavedVariablesWriter
             attempt++;
             try
             {
-                await File.WriteAllTextAsync(tmpFilePath, newFileContent, Encoding.UTF8, ct);
+                await File.WriteAllTextAsync(tmpFilePath, fileContent, Encoding.UTF8, ct);
                 File.Move(tmpFilePath, luaFilePath, overwrite: true);
 
-                _logger.LogInformation("Successfully wrote {Block} to {Path}", Constants.BlockIdentifier, luaFilePath);
+                _logger.LogInformation("Successfully wrote {Count} encounter profiles to {Path}",
+                    encounterProfiles.Count, luaFilePath);
                 return new WriteResult(true, null, attempt);
             }
             catch (IOException ex) when (attempt <= MaxRetries)
@@ -60,14 +71,11 @@ public class SavedVariablesWriter : ISavedVariablesWriter
                     "IOException on write attempt {Attempt}/{MaxAttempts}, retrying in {Delay}s",
                     attempt, MaxRetries + 1, RetryDelay.TotalSeconds);
 
-                // Clean up partial tmp file if it exists
                 TryDeleteFile(tmpFilePath);
-
                 await Task.Delay(RetryDelay, ct);
             }
             catch (IOException ex)
             {
-                // Final attempt also failed
                 _logger.LogError(ex, "All {MaxAttempts} write attempts failed for {Path}", MaxRetries + 1, luaFilePath);
                 TryDeleteFile(tmpFilePath);
                 return new WriteResult(false, $"Write failed after {attempt} attempts: {ex.Message}", attempt);
@@ -76,167 +84,261 @@ public class SavedVariablesWriter : ISavedVariablesWriter
     }
 
     /// <summary>
-    /// Reads the existing Lua file (if present), finds the TimelineRemindersDB block
-    /// via brace-counting, replaces it with the new content, and preserves everything else.
-    /// If no existing block is found, appends the new content.
+    /// Merges a single encounter profile into the file content at the text level.
+    /// Finds ["reminders"] section → [encounterId] block → difficulty index → profile.
     /// </summary>
-    internal static async Task<string> BuildMergedContentAsync(string luaFilePath, string newBlockContent)
+    internal static string MergeEncounterProfile(string content, EncounterEntry entry, string profileContent)
     {
-        if (!File.Exists(luaFilePath))
+        // Step 1: Find the ["reminders"] section within LiquidRemindersSaved
+        var remindersIdx = FindKeySection(content, $"[\"{Constants.RemindersSection}\"]");
+        if (remindersIdx < 0)
+            return content; // No reminders section found, can't merge
+
+        var remindersBraceStart = content.IndexOf('{', remindersIdx);
+        if (remindersBraceStart < 0)
+            return content;
+
+        var remindersBraceEnd = FindMatchingCloseBrace(content, remindersBraceStart);
+        if (remindersBraceEnd < 0)
+            return content;
+
+        // Step 2: Within the reminders section, find [encounterId] = {
+        var encounterKey = $"[{entry.EncounterId}]";
+        var searchStart = remindersBraceStart;
+        var encounterIdx = FindKeySection(content, encounterKey, searchStart, remindersBraceEnd);
+
+        if (encounterIdx < 0)
         {
-            return newBlockContent;
+            // Encounter block doesn't exist — create it with the profile
+            var insertContent = BuildNewEncounterBlock(entry, profileContent);
+            var insertPos = remindersBraceEnd; // Insert before the closing brace of reminders
+            return content.Insert(insertPos, insertContent);
         }
 
-        var existingContent = await File.ReadAllTextAsync(luaFilePath);
+        var encounterBraceStart = content.IndexOf('{', encounterIdx);
+        if (encounterBraceStart < 0)
+            return content;
 
-        // Find the start of "TimelineRemindersDB = {"
-        var blockStart = FindBlockStart(existingContent);
-        if (blockStart < 0)
+        var encounterBraceEnd = FindMatchingCloseBrace(content, encounterBraceStart);
+        if (encounterBraceEnd < 0)
+            return content;
+
+        // Step 3: Navigate to the correct difficulty index (nth { at this nesting level)
+        var difficultyBlockStart = FindNthBraceAtLevel(content, encounterBraceStart + 1, encounterBraceEnd, entry.DifficultyIndex);
+        if (difficultyBlockStart < 0)
         {
-            // No existing block found — append new content
-            var sb = new StringBuilder(existingContent);
-            if (existingContent.Length > 0 && !existingContent.EndsWith('\n'))
-            {
-                sb.Append('\n');
-            }
-            sb.Append(newBlockContent);
-            return sb.ToString();
+            // Difficulty block doesn't exist — create it
+            var insertContent = BuildNewDifficultyBlock(entry, profileContent);
+            var insertPos = encounterBraceEnd;
+            return content.Insert(insertPos, insertContent);
         }
 
-        // Find the matching closing brace using brace-counting
-        var blockEnd = FindMatchingCloseBrace(existingContent, blockStart);
-        if (blockEnd < 0)
+        var difficultyBraceEnd = FindMatchingCloseBrace(content, difficultyBlockStart);
+        if (difficultyBraceEnd < 0)
+            return content;
+
+        // Step 4: Within the difficulty block, find or replace the profile
+        var profileKey = $"[\"{Constants.ProfileName}\"]";
+        var profileIdx = FindKeySection(content, profileKey, difficultyBlockStart, difficultyBraceEnd);
+
+        if (profileIdx >= 0)
         {
-            // Malformed block — replace from blockStart to end of file
+            // Profile exists — replace it
+            var profileBraceStart = content.IndexOf('{', profileIdx);
+            if (profileBraceStart < 0)
+                return content;
+
+            var profileBraceEnd = FindMatchingCloseBrace(content, profileBraceStart);
+            if (profileBraceEnd < 0)
+                return content;
+
+            // Find the end of the profile entry (include trailing comma if present)
+            var replaceEnd = profileBraceEnd + 1;
+            if (replaceEnd < content.Length && content[replaceEnd] == ',')
+                replaceEnd++;
+
+            // Find the start of the profile key
+            var replaceStart = profileIdx;
+
             var sb = new StringBuilder();
-            sb.Append(existingContent.AsSpan(0, blockStart));
-            sb.Append(newBlockContent);
+            sb.Append(content.AsSpan(0, replaceStart));
+            sb.Append(profileContent);
+            sb.Append(content.AsSpan(replaceEnd));
             return sb.ToString();
         }
-
-        // blockEnd points to the closing '}'. We need to include it.
-        var endIndex = blockEnd + 1;
-
-        // Build the merged content: everything before the block + new content + everything after
-        var result = new StringBuilder();
-        result.Append(existingContent.AsSpan(0, blockStart));
-        result.Append(newBlockContent);
-        result.Append(existingContent.AsSpan(endIndex));
-
-        return result.ToString();
+        else
+        {
+            // Profile doesn't exist — insert before the closing brace of the difficulty block
+            var sb = new StringBuilder();
+            sb.Append(content.AsSpan(0, difficultyBraceEnd));
+            // Add the profile content
+            if (difficultyBraceEnd > 0 && content[difficultyBraceEnd - 1] != '\n')
+                sb.Append('\n');
+            sb.Append(profileContent);
+            if (!profileContent.EndsWith('\n'))
+                sb.Append('\n');
+            sb.Append(content.AsSpan(difficultyBraceEnd));
+            return sb.ToString();
+        }
     }
 
     /// <summary>
-    /// Finds the character index where the TimelineRemindersDB assignment starts.
-    /// Looks for "TimelineRemindersDB" followed by optional whitespace, "=", optional whitespace, "{".
-    /// Returns the index of 'T' in TimelineRemindersDB, or -1 if not found.
+    /// Finds a Lua key like ["reminders"] or [3176] followed by = { in the content.
+    /// Returns the index of the key start, or -1 if not found.
     /// </summary>
-    internal static int FindBlockStart(string content)
+    internal static int FindKeySection(string content, string key, int searchFrom = 0, int searchTo = -1)
     {
-        var searchFrom = 0;
-        while (searchFrom < content.Length)
+        if (searchTo < 0) searchTo = content.Length;
+
+        var pos = searchFrom;
+        while (pos < searchTo)
         {
-            var idx = content.IndexOf(Constants.BlockIdentifier, searchFrom, StringComparison.Ordinal);
-            if (idx < 0)
+            var idx = content.IndexOf(key, pos, StringComparison.Ordinal);
+            if (idx < 0 || idx >= searchTo)
                 return -1;
 
-            // Verify this is a top-level assignment: scan forward past optional whitespace, '=', whitespace, '{'
-            var pos = idx + Constants.BlockIdentifier.Length;
+            // Verify this is followed by optional whitespace, '=', optional whitespace, '{'
+            var afterKey = idx + key.Length;
+            while (afterKey < content.Length && char.IsWhiteSpace(content[afterKey]))
+                afterKey++;
 
-            // Skip whitespace
-            while (pos < content.Length && char.IsWhiteSpace(content[pos]))
-                pos++;
-
-            // Expect '='
-            if (pos < content.Length && content[pos] == '=')
+            if (afterKey < content.Length && content[afterKey] == '=')
             {
-                pos++;
+                afterKey++;
+                while (afterKey < content.Length && char.IsWhiteSpace(content[afterKey]))
+                    afterKey++;
 
-                // Skip whitespace
-                while (pos < content.Length && char.IsWhiteSpace(content[pos]))
-                    pos++;
-
-                // Expect '{'
-                if (pos < content.Length && content[pos] == '{')
-                {
+                if (afterKey < content.Length && content[afterKey] == '{')
                     return idx;
-                }
             }
 
-            // Not a valid block assignment, keep searching
-            searchFrom = idx + Constants.BlockIdentifier.Length;
+            pos = idx + key.Length;
         }
 
         return -1;
     }
 
     /// <summary>
-    /// Starting from the first '{' after the block identifier, counts braces to find
-    /// the matching closing '}'. Returns the index of the closing brace, or -1 if unmatched.
+    /// Finds the nth opening brace '{' at the immediate nesting level within a block.
+    /// Used to navigate to the nth array element (difficulty index).
     /// </summary>
-    internal static int FindMatchingCloseBrace(string content, int blockStart)
+    internal static int FindNthBraceAtLevel(string content, int start, int end, int n)
     {
-        // First, find the opening brace
-        var pos = content.IndexOf('{', blockStart);
-        if (pos < 0)
-            return -1;
-
-        var depth = 0;
+        var count = 0;
         var inString = false;
         var stringDelimiter = '\0';
 
-        for (var i = pos; i < content.Length; i++)
+        for (var i = start; i < end; i++)
         {
             var c = content[i];
 
             if (inString)
             {
-                if (c == '\\' && i + 1 < content.Length)
-                {
-                    // Skip escaped character
-                    i++;
-                    continue;
-                }
-                if (c == stringDelimiter)
-                {
-                    inString = false;
-                }
+                if (c == '\\' && i + 1 < content.Length) { i++; continue; }
+                if (c == stringDelimiter) inString = false;
                 continue;
             }
 
-            // Check for Lua single-line comment
             if (c == '-' && i + 1 < content.Length && content[i + 1] == '-')
             {
-                // Skip to end of line
                 var eol = content.IndexOf('\n', i);
-                if (eol < 0)
-                    return -1; // Comment runs to end of file with no closing brace
+                if (eol < 0) return -1;
                 i = eol;
                 continue;
             }
 
-            if (c == '"' || c == '\'')
-            {
-                inString = true;
-                stringDelimiter = c;
-                continue;
-            }
+            if (c == '"' || c == '\'') { inString = true; stringDelimiter = c; continue; }
 
             if (c == '{')
             {
-                depth++;
-            }
-            else if (c == '}')
-            {
-                depth--;
-                if (depth == 0)
-                {
+                count++;
+                if (count == n)
                     return i;
-                }
+
+                // Skip past this entire brace-matched block
+                var matchEnd = FindMatchingCloseBrace(content, i);
+                if (matchEnd < 0) return -1;
+                i = matchEnd;
             }
         }
 
         return -1;
+    }
+
+    /// <summary>
+    /// Starting from an opening '{', counts braces to find the matching closing '}'.
+    /// Handles strings and Lua comments.
+    /// </summary>
+    internal static int FindMatchingCloseBrace(string content, int braceStart)
+    {
+        var depth = 0;
+        var inString = false;
+        var stringDelimiter = '\0';
+
+        for (var i = braceStart; i < content.Length; i++)
+        {
+            var c = content[i];
+
+            if (inString)
+            {
+                if (c == '\\' && i + 1 < content.Length) { i++; continue; }
+                if (c == stringDelimiter) inString = false;
+                continue;
+            }
+
+            if (c == '-' && i + 1 < content.Length && content[i + 1] == '-')
+            {
+                var eol = content.IndexOf('\n', i);
+                if (eol < 0) return -1;
+                i = eol;
+                continue;
+            }
+
+            if (c == '"' || c == '\'') { inString = true; stringDelimiter = c; continue; }
+
+            if (c == '{') depth++;
+            else if (c == '}')
+            {
+                depth--;
+                if (depth == 0) return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private static string BuildNewEncounterBlock(EncounterEntry entry, string profileContent)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"\t\t[{entry.EncounterId}] = {{");
+
+        // Fill empty difficulty blocks up to the target index
+        for (var i = 1; i < entry.DifficultyIndex; i++)
+        {
+            sb.AppendLine("\t\t\t{");
+            sb.AppendLine("\t\t\t},");
+        }
+
+        // The target difficulty block with the profile
+        sb.AppendLine("\t\t\t{");
+        sb.Append(profileContent);
+        if (!profileContent.EndsWith('\n'))
+            sb.AppendLine();
+        sb.AppendLine("\t\t\t},");
+        sb.AppendLine("\t\t},");
+
+        return sb.ToString();
+    }
+
+    private static string BuildNewDifficultyBlock(EncounterEntry entry, string profileContent)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("\t\t\t{");
+        sb.Append(profileContent);
+        if (!profileContent.EndsWith('\n'))
+            sb.AppendLine();
+        sb.AppendLine("\t\t\t},");
+        return sb.ToString();
     }
 
     private void CreateBackup(string luaFilePath)
@@ -247,7 +349,7 @@ public class SavedVariablesWriter : ISavedVariablesWriter
             Directory.CreateDirectory(backupDir);
 
             var timestamp = DateTime.Now.ToString("yyyy-MM-ddTHHmmss");
-            var backupFileName = $"TimelineReminders_{timestamp}.lua";
+            var backupFileName = $"{Path.GetFileNameWithoutExtension(Constants.LuaFileName)}_{timestamp}.lua";
             var backupPath = Path.Combine(backupDir, backupFileName);
 
             File.Copy(luaFilePath, backupPath, overwrite: true);
@@ -263,7 +365,8 @@ public class SavedVariablesWriter : ISavedVariablesWriter
 
     private void CleanOldBackups(string backupDir, int keepCount = 10)
     {
-        var backups = Directory.GetFiles(backupDir, "TimelineReminders_*.lua")
+        var pattern = $"{Path.GetFileNameWithoutExtension(Constants.LuaFileName)}_*.lua";
+        var backups = Directory.GetFiles(backupDir, pattern)
             .OrderByDescending(f => f)
             .Skip(keepCount);
         foreach (var old in backups)

@@ -13,8 +13,14 @@ namespace LATimelineReminderSync.Tests.Properties;
 /// </summary>
 public class WriteCorrectnessTests
 {
+    private static SavedVariablesWriter CreateWriter(string dir)
+    {
+        var logger = new Mock<ILogger<SavedVariablesWriter>>();
+        return new SavedVariablesWriter(dir, Constants.ProfileName, logger.Object);
+    }
+
     [Property(MaxTest = 30)]
-    public Property AfterSyncCycle_FileHasNewTimelineRemindersDBBlock()
+    public Property AfterSyncCycle_FileHasNewProfileBlock()
     {
         var gen = from data in Arb.Generate<NonEmptyString>()
                   let safeData = data.Get.Replace("\"", "").Replace("\\", "").Replace("\0", "")
@@ -27,34 +33,40 @@ public class WriteCorrectnessTests
             Directory.CreateDirectory(tempDir);
             try
             {
-                // Set up existing file with old content
-                var luaPath = Path.Combine(tempDir, "TimelineReminders.lua");
-                var oldContent = "TimelineRemindersDB = {\n  [\"old\"] = \"stale\",\n}";
+                // Set up existing file with a reminders section
+                var luaPath = Path.Combine(tempDir, Constants.LuaFileName);
+                var oldContent = @"LiquidRemindersSaved = {
+[""reminders""] = {
+},
+}";
                 File.WriteAllText(luaPath, oldContent);
 
                 // Set up hash store
                 var hashFile = Path.Combine(tempDir, ".lasthash");
                 var hashStore = new ContentHashStore(hashFile);
-                hashStore.SetLastHash(ContentHashStore.ComputeHash(oldContent));
+                hashStore.SetLastHash(ContentHashStore.ComputeHash("old-content"));
 
-                // New content to write
-                var newBlock = $"TimelineRemindersDB = {{\n  [\"new\"] = \"{data}\",\n}}";
+                // New profile content to write
+                var profileContent = $"[\"Liberty & Allegiance\"] = {{\n    [\"options\"] = {{}},\n    [\"reminders\"] = {{ [\"{data}\"] = true }},\n}},";
+                var entry = new EncounterEntry { EncounterId = 3176, EncounterName = "Test Boss", DifficultyIndex = 2, FileName = "test.lua" };
 
-                // Simulate the sync cycle: hash differs → validate → write → update hash
-                var newHash = ContentHashStore.ComputeHash(newBlock);
+                // Hash diff
+                var newHash = ContentHashStore.ComputeHash(profileContent);
                 var lastHash = hashStore.GetLastHash();
 
                 if (newHash == lastHash)
                     return true.Label("Same hash, no update needed (degenerate case)");
 
+                // Validate snippet
                 var validator = new ContentValidator();
-                var validation = validator.Validate(newBlock);
+                var validation = validator.ValidateEncounterSnippet(profileContent);
                 if (!validation.IsValid)
                     return true.Label("Validation failed (degenerate case)");
 
-                var logger = new Mock<ILogger<SavedVariablesWriter>>();
-                var writer = new SavedVariablesWriter(tempDir, logger.Object);
-                var writeResult = writer.WriteAsync(newBlock, CancellationToken.None).GetAwaiter().GetResult();
+                // Write
+                var writer = CreateWriter(tempDir);
+                var profiles = new Dictionary<EncounterEntry, string> { [entry] = profileContent };
+                var writeResult = writer.WriteAsync(profiles, CancellationToken.None).GetAwaiter().GetResult();
 
                 if (!writeResult.Success)
                     return false.Label("Write should succeed");
@@ -63,15 +75,15 @@ public class WriteCorrectnessTests
 
                 // Verify file content
                 var fileContent = File.ReadAllText(luaPath);
-                var containsNewData = fileContent.Contains($"[\"new\"] = \"{data}\"");
-                var doesNotContainOld = !fileContent.Contains("[\"old\"] = \"stale\"");
+                var containsNewData = fileContent.Contains(data);
+                var containsProfile = fileContent.Contains("Liberty & Allegiance");
 
                 // Verify hash was updated
                 var storedHash = hashStore.GetLastHash();
                 var hashUpdated = storedHash == newHash;
 
                 return containsNewData.Label("File should contain new data")
-                    .And(doesNotContainOld).Label("File should not contain old data")
+                    .And(containsProfile).Label("File should contain profile name")
                     .And(hashUpdated).Label("Hash should be updated");
             }
             finally

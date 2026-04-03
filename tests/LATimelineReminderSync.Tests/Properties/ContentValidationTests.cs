@@ -11,13 +11,12 @@ namespace LATimelineReminderSync.Tests.Properties;
 public class ContentValidationTests
 {
     private readonly ContentValidator _validator = new();
-    private const string Marker = "TimelineRemindersDB";
+    private const string Marker = "LiquidRemindersSaved";
     private const long MaxSizeBytes = 5 * 1024 * 1024;
 
     [Property(MaxTest = 100)]
     public Property ValidContent_WithMarker_IsAccepted()
     {
-        // Generate non-empty strings that contain the marker and are under 5MB
         var gen = from prefix in Arb.Generate<NonEmptyString>()
                   from suffix in Arb.Generate<NonEmptyString>()
                   let content = prefix.Get + Marker + suffix.Get
@@ -46,7 +45,6 @@ public class ContentValidationTests
     [Property(MaxTest = 100)]
     public Property ContentWithoutMarker_IsRejected()
     {
-        // Generate non-empty strings that do NOT contain the marker
         var gen = from s in Arb.Generate<NonEmptyString>()
                   let content = s.Get.Replace(Marker, "SomeOtherText")
                   where !string.IsNullOrWhiteSpace(content)
@@ -63,8 +61,6 @@ public class ContentValidationTests
     [Property(MaxTest = 5)]
     public Property ContentOverSizeLimit_IsRejected()
     {
-        // Generate a string that exceeds 5MB when measured in char bytes
-        // 5MB / 2 bytes per char = 2,621,440 chars. We need > that.
         var charCount = (int)(MaxSizeBytes / sizeof(char)) + 1;
         var gen = Gen.Constant(new string('x', charCount - Marker.Length) + Marker);
 
@@ -73,5 +69,36 @@ public class ContentValidationTests
             var result = _validator.Validate(content);
             return (!result.IsValid).Label("Expected IsValid=false for oversized content");
         });
+    }
+
+    [Fact]
+    public void ValidateEncounterSnippet_WithRemindersKey_IsValid()
+    {
+        var snippet = "[\"Liberty & Allegiance\"] = {\n    [\"options\"] = {},\n    [\"reminders\"] = {},\n},";
+        var result = _validator.ValidateEncounterSnippet(snippet);
+        Assert.True(result.IsValid);
+    }
+
+    [Fact]
+    public void ValidateEncounterSnippet_WithTriggerKey_IsValid()
+    {
+        var snippet = "[\"Liberty & Allegiance\"] = {\n    [\"trigger\"] = {},\n},";
+        var result = _validator.ValidateEncounterSnippet(snippet);
+        Assert.True(result.IsValid);
+    }
+
+    [Fact]
+    public void ValidateEncounterSnippet_WithoutExpectedKeys_IsInvalid()
+    {
+        var snippet = "[\"Liberty & Allegiance\"] = {\n    [\"something\"] = {},\n},";
+        var result = _validator.ValidateEncounterSnippet(snippet);
+        Assert.False(result.IsValid);
+    }
+
+    [Fact]
+    public void ValidateEncounterSnippet_Empty_IsInvalid()
+    {
+        var result = _validator.ValidateEncounterSnippet("");
+        Assert.False(result.IsValid);
     }
 }

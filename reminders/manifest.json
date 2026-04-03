@@ -1,0 +1,10 @@
+{
+  "encounters": [
+    {
+      "encounterId": 3176,
+      "encounterName": "Imperator Averzian",
+      "difficultyIndex": 2,
+      "fileName": "The-Voidspire/mythic/Imperator-Averzian.lua"
+    }
+  ]
+}

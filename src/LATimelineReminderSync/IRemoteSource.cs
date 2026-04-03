@@ -4,5 +4,6 @@ namespace LATimelineReminderSync;
 
 public interface IRemoteSource
 {
-    Task<FetchResult> FetchAsync(CancellationToken ct);
+    Task<FetchResult> FetchManifestAsync(CancellationToken ct);
+    Task<FetchResult> FetchEncounterAsync(string fileName, CancellationToken ct);
 }

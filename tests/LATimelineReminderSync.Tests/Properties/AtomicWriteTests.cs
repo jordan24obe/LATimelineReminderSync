@@ -1,6 +1,7 @@
 using FsCheck;
 using FsCheck.Xunit;
 using LATimelineReminderSync;
+using LATimelineReminderSync.Models;
 using Microsoft.Extensions.Logging;
 using Moq;
 
@@ -12,11 +13,24 @@ namespace LATimelineReminderSync.Tests.Properties;
 /// </summary>
 public class AtomicWriteTests
 {
+    private static SavedVariablesWriter CreateWriter(string dir)
+    {
+        var logger = new Mock<ILogger<SavedVariablesWriter>>();
+        return new SavedVariablesWriter(dir, Constants.ProfileName, logger.Object);
+    }
+
+    private static string MakeBaseSavedVariablesFile()
+    {
+        return @"LiquidRemindersSaved = {
+[""reminders""] = {
+},
+}";
+    }
+
     [Property(MaxTest = 30)]
     public Property AfterSuccessfulWrite_FileContainsExpectedContent()
     {
         var gen = from data in Arb.Generate<NonEmptyString>()
-                  // Avoid characters that would break Lua string literals
                   let safeData = data.Get.Replace("\"", "").Replace("\\", "").Replace("\0", "")
                   where !string.IsNullOrWhiteSpace(safeData)
                   select safeData;
@@ -27,19 +41,26 @@ public class AtomicWriteTests
             Directory.CreateDirectory(tempDir);
             try
             {
-                var logger = new Mock<ILogger<SavedVariablesWriter>>();
-                var writer = new SavedVariablesWriter(tempDir, logger.Object);
+                // Create a base file with the reminders section
+                var luaPath = Path.Combine(tempDir, Constants.LuaFileName);
+                File.WriteAllText(luaPath, MakeBaseSavedVariablesFile());
 
-                var content = $"TimelineRemindersDB = {{\n  [\"data\"] = \"{data}\",\n}}";
-                var result = writer.WriteAsync(content, CancellationToken.None).GetAwaiter().GetResult();
+                var writer = CreateWriter(tempDir);
+
+                var profileContent = $"[\"Liberty & Allegiance\"] = {{\n    [\"options\"] = {{}},\n    [\"reminders\"] = {{ [\"{data}\"] = true }},\n}},";
+                var profiles = new Dictionary<EncounterEntry, string>
+                {
+                    [new EncounterEntry { EncounterId = 9999, EncounterName = "Test", DifficultyIndex = 1, FileName = "test.lua" }] = profileContent
+                };
+
+                var result = writer.WriteAsync(profiles, CancellationToken.None).GetAwaiter().GetResult();
 
                 if (!result.Success)
                     return false.Label("Write should succeed");
 
-                var luaPath = Path.Combine(tempDir, "TimelineReminders.lua");
                 var fileContent = File.ReadAllText(luaPath);
 
-                // The file should contain the written content
+                // The file should contain the written data
                 var containsData = fileContent.Contains(data);
 
                 // No .tmp file should remain

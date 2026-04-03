@@ -4,5 +4,5 @@ namespace LATimelineReminderSync;
 
 public interface ISavedVariablesWriter
 {
-    Task<WriteResult> WriteAsync(string content, CancellationToken ct);
+    Task<WriteResult> WriteAsync(Dictionary<EncounterEntry, string> encounterProfiles, CancellationToken ct);
 }

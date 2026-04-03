@@ -43,7 +43,7 @@ public class ContentValidatorTests
     [Fact]
     public void Validate_WithMarker_ReturnsValid()
     {
-        var content = "TimelineRemindersDB = {\n  [\"encounters\"] = {},\n}";
+        var content = "LiquidRemindersSaved = {\n  [\"reminders\"] = {},\n}";
         var result = _validator.Validate(content);
         Assert.True(result.IsValid);
         Assert.Null(result.Reason);
@@ -52,9 +52,8 @@ public class ContentValidatorTests
     [Fact]
     public void Validate_ExactlyAtSizeLimit_ReturnsValid()
     {
-        // 5MB / 2 bytes per char = 2,621,440 chars exactly
         var maxChars = (5 * 1024 * 1024) / sizeof(char);
-        var marker = "TimelineRemindersDB";
+        var marker = "LiquidRemindersSaved";
         var padding = new string('x', maxChars - marker.Length);
         var content = marker + padding;
 
@@ -65,9 +64,8 @@ public class ContentValidatorTests
     [Fact]
     public void Validate_OneByteOverSizeLimit_ReturnsInvalid()
     {
-        // One char over the limit
         var maxChars = (5 * 1024 * 1024) / sizeof(char) + 1;
-        var marker = "TimelineRemindersDB";
+        var marker = "LiquidRemindersSaved";
         var padding = new string('x', maxChars - marker.Length);
         var content = marker + padding;
 
@@ -79,8 +77,30 @@ public class ContentValidatorTests
     [Fact]
     public void Validate_MarkerInMiddleOfContent_ReturnsValid()
     {
-        var content = "-- some lua comment\nTimelineRemindersDB = {\n}\n-- end";
+        var content = "-- some lua comment\nLiquidRemindersSaved = {\n}\n-- end";
         var result = _validator.Validate(content);
         Assert.True(result.IsValid);
+    }
+
+    [Fact]
+    public void ValidateEncounterSnippet_WithRemindersAndOptions_ReturnsValid()
+    {
+        var snippet = "[\"Liberty & Allegiance\"] = {\n    [\"options\"] = {},\n    [\"reminders\"] = {},\n},";
+        var result = _validator.ValidateEncounterSnippet(snippet);
+        Assert.True(result.IsValid);
+    }
+
+    [Fact]
+    public void ValidateEncounterSnippet_Empty_ReturnsInvalid()
+    {
+        var result = _validator.ValidateEncounterSnippet("");
+        Assert.False(result.IsValid);
+    }
+
+    [Fact]
+    public void ValidateEncounterSnippet_NoExpectedKeys_ReturnsInvalid()
+    {
+        var result = _validator.ValidateEncounterSnippet("[\"something\"] = { [\"data\"] = true }");
+        Assert.False(result.IsValid);
     }
 }

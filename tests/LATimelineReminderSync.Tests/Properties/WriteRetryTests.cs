@@ -1,4 +1,5 @@
 using LATimelineReminderSync;
+using LATimelineReminderSync.Models;
 using Microsoft.Extensions.Logging;
 using Moq;
 
@@ -10,14 +11,36 @@ namespace LATimelineReminderSync.Tests.Properties;
 /// </summary>
 public class WriteRetryTests
 {
+    private static SavedVariablesWriter CreateWriter(string dir)
+    {
+        var logger = new Mock<ILogger<SavedVariablesWriter>>();
+        return new SavedVariablesWriter(dir, Constants.ProfileName, logger.Object);
+    }
+
+    private static Dictionary<EncounterEntry, string> MakeProfiles(string profileContent)
+    {
+        return new Dictionary<EncounterEntry, string>
+        {
+            [new EncounterEntry { EncounterId = 9999, EncounterName = "Test", DifficultyIndex = 1, FileName = "test.lua" }] = profileContent
+        };
+    }
+
+    private static string MakeLiquidRemindersSavedFile()
+    {
+        return @"LiquidRemindersSaved = {
+    [""reminders""] = {
+    },
+}";
+    }
+
     [Fact]
     public async Task WriteAsync_WhenFolderMissing_ReturnsWriteError()
     {
         var nonExistentDir = Path.Combine(Path.GetTempPath(), $"missing_{Guid.NewGuid()}");
-        var logger = new Mock<ILogger<SavedVariablesWriter>>();
-        var writer = new SavedVariablesWriter(nonExistentDir, logger.Object);
+        var writer = CreateWriter(nonExistentDir);
 
-        var result = await writer.WriteAsync("TimelineRemindersDB = {}", CancellationToken.None);
+        var profiles = MakeProfiles("[\"Liberty & Allegiance\"] = {\n    [\"options\"] = {},\n    [\"reminders\"] = {},\n},");
+        var result = await writer.WriteAsync(profiles, CancellationToken.None);
 
         Assert.False(result.Success);
         Assert.Contains("does not exist", result.ErrorMessage);
@@ -31,11 +54,13 @@ public class WriteRetryTests
         Directory.CreateDirectory(tempDir);
         try
         {
-            var logger = new Mock<ILogger<SavedVariablesWriter>>();
-            var writer = new SavedVariablesWriter(tempDir, logger.Object);
+            // Create a base file with the reminders section
+            var luaPath = Path.Combine(tempDir, Constants.LuaFileName);
+            File.WriteAllText(luaPath, MakeLiquidRemindersSavedFile());
 
-            var content = "TimelineRemindersDB = {\n  [\"data\"] = true,\n}";
-            var result = await writer.WriteAsync(content, CancellationToken.None);
+            var writer = CreateWriter(tempDir);
+            var profiles = MakeProfiles("[\"Liberty & Allegiance\"] = {\n    [\"options\"] = {},\n    [\"reminders\"] = {},\n},");
+            var result = await writer.WriteAsync(profiles, CancellationToken.None);
 
             Assert.True(result.Success);
             Assert.Equal(1, result.AttemptsUsed);
@@ -50,24 +75,16 @@ public class WriteRetryTests
     [Fact]
     public async Task WriteAsync_RetryLogic_MaxRetriesIs3()
     {
-        // Verify the retry constant by testing that a successful write on first attempt
-        // returns AttemptsUsed=1, confirming the retry mechanism is wired correctly.
-        // The actual retry behavior (IOException → retry up to 3 times) is an implementation
-        // detail that's hard to test without mocking the filesystem, but we can verify
-        // the writer's contract: it reports attempts used.
         var tempDir = Path.Combine(Path.GetTempPath(), $"retry_logic_{Guid.NewGuid()}");
         Directory.CreateDirectory(tempDir);
         try
         {
-            // Pre-create a file so backup logic runs too
-            var luaPath = Path.Combine(tempDir, "TimelineReminders.lua");
-            File.WriteAllText(luaPath, "TimelineRemindersDB = {\n  [\"old\"] = true,\n}");
+            var luaPath = Path.Combine(tempDir, Constants.LuaFileName);
+            File.WriteAllText(luaPath, MakeLiquidRemindersSavedFile());
 
-            var logger = new Mock<ILogger<SavedVariablesWriter>>();
-            var writer = new SavedVariablesWriter(tempDir, logger.Object);
-
-            var content = "TimelineRemindersDB = {\n  [\"new\"] = true,\n}";
-            var result = await writer.WriteAsync(content, CancellationToken.None);
+            var writer = CreateWriter(tempDir);
+            var profiles = MakeProfiles("[\"Liberty & Allegiance\"] = {\n    [\"options\"] = {},\n    [\"reminders\"] = {},\n},");
+            var result = await writer.WriteAsync(profiles, CancellationToken.None);
 
             Assert.True(result.Success);
             Assert.Equal(1, result.AttemptsUsed);
@@ -87,22 +104,20 @@ public class WriteRetryTests
         Directory.CreateDirectory(tempDir);
         try
         {
-            var luaPath = Path.Combine(tempDir, "TimelineReminders.lua");
-            var originalContent = "TimelineRemindersDB = {\n  [\"original\"] = true,\n}";
+            var luaPath = Path.Combine(tempDir, Constants.LuaFileName);
+            var originalContent = MakeLiquidRemindersSavedFile();
             File.WriteAllText(luaPath, originalContent);
 
-            var logger = new Mock<ILogger<SavedVariablesWriter>>();
-            var writer = new SavedVariablesWriter(tempDir, logger.Object);
-
-            var newContent = "TimelineRemindersDB = {\n  [\"updated\"] = true,\n}";
-            var result = await writer.WriteAsync(newContent, CancellationToken.None);
+            var writer = CreateWriter(tempDir);
+            var profiles = MakeProfiles("[\"Liberty & Allegiance\"] = {\n    [\"options\"] = {},\n    [\"reminders\"] = { [\"test\"] = true },\n},");
+            var result = await writer.WriteAsync(profiles, CancellationToken.None);
 
             Assert.True(result.Success);
 
             // Verify backup was created
             var backupDir = Path.Combine(tempDir, "Backups");
             Assert.True(Directory.Exists(backupDir));
-            var backups = Directory.GetFiles(backupDir, "TimelineReminders_*.lua");
+            var backups = Directory.GetFiles(backupDir, "LiquidRemindersSaved_*.lua");
             Assert.Single(backups);
 
             // Verify backup has original content
@@ -111,7 +126,7 @@ public class WriteRetryTests
 
             // Verify new file has updated content
             var fileContent = File.ReadAllText(luaPath);
-            Assert.Contains("[\"updated\"]", fileContent);
+            Assert.Contains("[\"test\"] = true", fileContent);
         }
         finally
         {

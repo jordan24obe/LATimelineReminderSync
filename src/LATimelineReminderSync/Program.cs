@@ -32,9 +32,16 @@ if (args.Length > 0)
             // Fall through to host builder in console/foreground mode
             break;
 
+        case "merge":
+            await RunMergeCommand(args);
+            return;
+
         default:
             Console.Error.WriteLine(
-                $"Unknown verb '{verb}'. Valid verbs: install, uninstall, start, stop, run");
+                $"Unknown verb '{verb}'. Valid verbs: install, uninstall, start, stop, run, merge");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Usage for merge:");
+            Console.Error.WriteLine("  LATimelineReminderSync merge --file <SavedVariables.lua> --profile <profile.lua> --encounter <id> --difficulty <index>");
             Environment.Exit(1);
             return;
     }
@@ -97,6 +104,7 @@ builder.Services.AddSingleton<IContentHashStore, ContentHashStore>();
 builder.Services.AddSingleton<ISavedVariablesWriter>(sp =>
     new SavedVariablesWriter(
         syncConfig.AddonDataFolder,
+        syncConfig.ProfileName,
         sp.GetRequiredService<ILogger<SavedVariablesWriter>>()));
 
 // Register HTTP client with timeout
@@ -161,6 +169,88 @@ static LogEventLevel ParseLogLevel(string level)
         "fatal" => LogEventLevel.Fatal,
         _ => LogEventLevel.Information
     };
+}
+
+
+static async Task RunMergeCommand(string[] args)
+{
+    // Parse args: merge --file <path> --profile <path> --encounter <id> --difficulty <index>
+    string? filePath = null, profilePath = null;
+    int encounterId = 0, difficultyIndex = 0;
+
+    for (var i = 1; i < args.Length - 1; i++)
+    {
+        switch (args[i].ToLowerInvariant())
+        {
+            case "--file":
+            case "-f":
+                filePath = args[++i];
+                break;
+            case "--profile":
+            case "-p":
+                profilePath = args[++i];
+                break;
+            case "--encounter":
+            case "-e":
+                encounterId = int.Parse(args[++i]);
+                break;
+            case "--difficulty":
+            case "-d":
+                difficultyIndex = int.Parse(args[++i]);
+                break;
+        }
+    }
+
+    if (string.IsNullOrEmpty(filePath) || string.IsNullOrEmpty(profilePath) || encounterId == 0 || difficultyIndex == 0)
+    {
+        Console.Error.WriteLine("Missing required arguments.");
+        Console.Error.WriteLine("Usage: LATimelineReminderSync merge --file <SavedVariables.lua> --profile <profile.lua> --encounter <id> --difficulty <index>");
+        Console.Error.WriteLine();
+        Console.Error.WriteLine("Example:");
+        Console.Error.WriteLine("  LATimelineReminderSync merge --file LiquidRemindersSaved.lua --profile imperator-mythic.lua --encounter 3176 --difficulty 2");
+        Environment.Exit(1);
+        return;
+    }
+
+    if (!File.Exists(filePath))
+    {
+        Console.Error.WriteLine($"SavedVariables file not found: {filePath}");
+        Environment.Exit(1);
+        return;
+    }
+
+    if (!File.Exists(profilePath))
+    {
+        Console.Error.WriteLine($"Profile file not found: {profilePath}");
+        Environment.Exit(1);
+        return;
+    }
+
+    var fileContent = await File.ReadAllTextAsync(filePath);
+    var profileContent = await File.ReadAllTextAsync(profilePath);
+
+    var entry = new EncounterEntry
+    {
+        EncounterId = encounterId,
+        EncounterName = $"Encounter {encounterId}",
+        DifficultyIndex = difficultyIndex,
+        FileName = Path.GetFileName(profilePath)
+    };
+
+    Console.WriteLine($"Merging profile into encounter {encounterId}, difficulty {difficultyIndex}...");
+    Console.WriteLine($"  SavedVariables: {filePath}");
+    Console.WriteLine($"  Profile:        {profilePath}");
+
+    var merged = SavedVariablesWriter.MergeEncounterProfile(fileContent, entry, profileContent);
+
+    // Create backup
+    var backupPath = filePath + ".bak";
+    File.Copy(filePath, backupPath, overwrite: true);
+    Console.WriteLine($"  Backup:         {backupPath}");
+
+    await File.WriteAllTextAsync(filePath, merged);
+    Console.WriteLine($"Done! Profile merged successfully.");
+    Console.WriteLine($"Reload WoW UI (/reload) to pick up the changes.");
 }
 
 static void RunScExe(params string[] scArgs)
